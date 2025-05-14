@@ -1,49 +1,58 @@
 import docker
-from utils.helpers import find_available_port
+# from utils.helpers import find_available_port
 from utils.nginx_helper import update_nginx_config, restart_nginx
 import os
 import re
+from docker.types import TaskTemplate, ContainerSpec, Mount, RestartPolicy, Placement
+from config import mapping_path, nginx_conf_path, docker_client
 
-mapping_path = os.getenv("MAPPING_PATH")
 if mapping_path[-1] == "/":
     mapping_path = mapping_path[:-1]
 
-docker_client = docker.from_env()
-
 def create_container(username: str):
     """
-    Create a new container with a unique username as the container name.
-    Assign a dynamically available port and use the nginx:stable-alpine3.20-slim image.
+    Create a new service in Docker Swarm with a unique username as the service name.
     """
     try:
-        # # Validate username
-        # if not username or not username.isalnum():
-        #     raise ValueError("Username must be alphanumeric and non-empty.")
+        # Ensure the folder for the user exists in mapping_path
+        container_mount_path = os.path.join(mapping_path, username)
+        user_folder_path = os.path.join("/code-spaces-mapping", username)
+        print(f"User folder path: {user_folder_path}")
+        if not os.path.exists(user_folder_path):
+            print(f"Creating user folder: {user_folder_path}")
+            os.makedirs(user_folder_path)
 
-        # Check if a container with the same name already exists
+        # Check if a service with the same name already exists
         try:
-            existing_container = docker_client.containers.get(f"{username}-code-server")
-            if existing_container:
-                raise ValueError(f"A container with the name '{username}' already exists.")
+            existing_service = docker_client.services.get(f"{username}-code-server")
+            print(existing_service)
+            if existing_service:
+                print("Comming to if")
+                raise ValueError(f"A service with the name '{username}' already exists.")
         except docker.errors.NotFound:
-            pass  # No existing container with this name
+            pass  # No existing service with this name
 
-        # # Find an available port
-        # port = find_available_port()
-
-        # Create the container
-        container = docker_client.containers.run(
-            "taasheeadmin/code-server",
-            detach=True,
-            name=f"{username}-code-server",
+        # Create the service
+        container_spec = ContainerSpec(
+            image="taasheeadmin/code-server",
             user="root",
-            # ports={'8080/tcp': port},  # Map container port 8080 to host port 8080
-            volumes={f"{mapping_path}/{username}": {"bind": "/home/coder", "mode": "rw"}},  # Volume mapping
-            # environment={"PASSWORD": f"coder-{username}"},  # Set password
-            restart_policy={"Name": "always"},  # Restart policy
+            mounts=[Mount(type="bind", source=container_mount_path, target="/home/coder")],
             tty=True,
-            network="code-spaces",
             command=["code-server", "--bind-addr", "0.0.0.0:8080", "--auth", "none"]
+        )
+
+        # Define task template with placement
+        task_template = TaskTemplate(
+            container_spec=container_spec,
+            restart_policy=RestartPolicy(condition="any"),
+            placement=Placement(constraints=["node.role == worker"])
+        )
+
+        # Create the service using low-level API
+        service = docker_client.api.create_service(
+            task_template=task_template,
+            name=f"{username}-code-server",
+            networks=["code-spaces"]
         )
 
         # Update Nginx config
@@ -52,100 +61,85 @@ def create_container(username: str):
         # Restart Nginx to apply changes
         restart_nginx()
 
-        # Return container details
+        # Return service details
         return {
-            "message": "Container created successfully!",
-            "container_id": container.id,
-            "container_name": f"{username}-code-server",
+            "message": "Service created successfully!",
+            "service_id": service["ID"],
+            "service_name": f"{username}-code-server",
             "access_url": f"/{username}/",
             "password": f"coder-{username}"
         }
 
     except Exception as e:
-        raise Exception(f"Error creating container: {str(e)}")
+        raise Exception(f"Error creating service: {str(e)}")
 
-def get_container(container_name: str):
+def get_container(service_name: str):
     """
-    Retrieve details of a container by its name.
+    Retrieve details of a service by its name.
     """
     try:
-        container = docker_client.containers.get(container_name)
+        service = docker_client.services.get(service_name)
         return {
-            "container_id": container.id,
-            "container_name": container_name,
-            "status": container.status,
-            # "ports": container.attrs['HostConfig']['PortBindings'].get('80/tcp', [])
+            "service_id": service.id,
+            "service_name": service_name,
+            "status": service.attrs['UpdateStatus']['State'] if 'UpdateStatus' in service.attrs else "active",
         }
     except docker.errors.NotFound:
         return None
     except Exception as e:
-        raise Exception(f"Error retrieving container: {str(e)}")
+        raise Exception(f"Error retrieving service: {str(e)}")
 
-NGINX_CONF_PATH = "/code/nginx.conf"
-
-def remove_container(container_name: str):
+def remove_container(service_name: str):
     """
-    Stop and remove a container by its name.
+    Remove a service by its name.
     Also removes the corresponding location block from nginx.conf and restarts Nginx.
     """
     try:
-        # Stop & remove the container
-        container = docker_client.containers.get(container_name)
-        container.stop()
-        container.remove()
+        # Remove the service
+        service = docker_client.services.get(service_name)
+        service.remove()
         
         # Remove location from nginx.conf
-        location_block_pattern = rf"\n\s*location /{container_name.replace('-code-server', '')}/ \{{.*?\n\s*\}}"
+        location_block_pattern = rf"\n\s*location /{service_name.replace('-code-server', '')}/ \{{.*?\n\s*\}}"
         
-        with open(NGINX_CONF_PATH, "r") as file:
+        with open(nginx_conf_path, "r") as file:
             nginx_conf = file.read()
 
         updated_conf = re.sub(location_block_pattern, "", nginx_conf, flags=re.DOTALL)
 
-        with open(NGINX_CONF_PATH, "w") as file:
+        with open(nginx_conf_path, "w") as file:
             file.write(updated_conf)
 
         # Restart Nginx to apply changes
         os.system("docker restart nginx")
 
-        return {"message": f"Container '{container_name}' removed successfully and Nginx updated!"}
+        return {"message": f"Service '{service_name}' removed successfully and Nginx updated!"}
 
     except docker.errors.NotFound:
-        return {"error": f"Container '{container_name}' not found."}
+        return {"error": f"Service '{service_name}' not found."}
     except Exception as e:
-        raise Exception(f"Error removing container: {str(e)}")
-
+        raise Exception(f"Error removing service: {str(e)}")
 
 def list_containers():
     """
-    List all running and stopped containers.
-    Handle cases where PortBindings is None or '80/tcp' is missing.
+    List all services in the Docker Swarm.
     """
     try:
-        containers = docker_client.containers.list(all=True)  # Include both running and stopped containers
-        container_list = []
+        services = docker_client.services.list()  # List all services
+        service_list = []
 
-        for c in containers:
-            if "code-server" not in c.name:
+        for s in services:
+            if "code-server" not in s.name:
                 continue
             
-            # # Retrieve port mappings
-            # ports_info = c.attrs['NetworkSettings']['Ports']
-            # mapped_ports = {}
-
-            # if ports_info:
-            #     for port, bindings in ports_info.items():
-            #         mapped_ports[port] = [binding['HostPort'] for binding in bindings] if bindings else []
-            
-            # Append container details to the list
-            container_list.append({
-                "id": c.id,
-                "name": c.name,
-                "status": c.status,
-                # "ports": mapped_ports
+            # Append service details to the list
+            service_list.append({
+                "id": s.id,
+                "name": s.name,
+                "status": s.attrs['UpdateStatus']['State'] if 'UpdateStatus' in s.attrs else "active",
             })
         
-        return container_list
+        return service_list
 
     except Exception as e:
-        raise Exception(f"Error listing containers: {str(e)}")
+        raise Exception(f"Error listing services: {str(e)}")

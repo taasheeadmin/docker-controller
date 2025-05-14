@@ -1,8 +1,5 @@
 import docker
-
-NGINX_HOST_CONF_PATH = "/code/nginx.conf"  # Host machine path
-
-docker_client = docker.from_env()
+from config import nginx_conf_path, docker_client
 
 def update_nginx_config(username: str):
     """
@@ -10,7 +7,7 @@ def update_nginx_config(username: str):
     Ensures the new location block is added inside the server block.
     """
     try:
-        with open(NGINX_HOST_CONF_PATH, "r") as conf_file:
+        with open(nginx_conf_path, "r") as conf_file:
             lines = conf_file.readlines()
 
         new_location_block = f"""
@@ -36,7 +33,7 @@ def update_nginx_config(username: str):
                 break
 
         # Write the updated content back to the file
-        with open(NGINX_HOST_CONF_PATH, "w") as conf_file:
+        with open(nginx_conf_path, "w") as conf_file:
             conf_file.writelines(lines)
 
         print(f"Nginx config updated for user: {username}")
@@ -46,13 +43,14 @@ def update_nginx_config(username: str):
 
 def restart_nginx():
     """
-    Restart the Nginx container to apply new configuration.
+    Restart the Nginx service in Docker Swarm to apply new configuration.
     """
     try:
-        nginx_container = docker_client.containers.get("nginx")
-        nginx_container.exec_run("nginx -s reload")
-        print("Nginx restarted successfully.")
+        # Use Docker Swarm service update to force a restart
+        nginx_service = docker_client.services.get("code_server_nginx")
+        nginx_service.update(force_update=True)
+        print("Nginx service restarted successfully in Docker Swarm.")
     except docker.errors.NotFound:
-        raise Exception("Nginx container not found. Ensure it's running.")
+        raise Exception("Nginx service not found in Docker Swarm. Ensure it's deployed.")
     except Exception as e:
-        raise Exception(f"Error restarting Nginx: {str(e)}")
+        raise Exception(f"Error restarting Nginx service: {str(e)}")

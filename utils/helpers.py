@@ -1,7 +1,5 @@
 import random
-import docker
-
-docker_client = docker.from_env()
+from config import docker_client
 
 def find_available_port():
     """
